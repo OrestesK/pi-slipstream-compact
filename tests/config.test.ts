@@ -22,6 +22,7 @@ describe("config", () => {
 		assert.equal(DEFAULT_CONFIG.contextReserveTokens, 24_000);
 		assert.equal(DEFAULT_CONFIG.slipstreamKeepRecentTokens, 50_000);
 		assert.equal(DEFAULT_CONFIG.artifactRoot, ".scratch/compactions");
+		assert.equal(DEFAULT_CONFIG.retainArtifacts, false);
 		assert.equal(DEFAULT_CONFIG.repairAttempts, 3);
 		assert.equal(DEFAULT_CONFIG.rejectedSummaryMode, "ask");
 		assert.equal(DEFAULT_CONFIG.statsFullPaths, false);
@@ -46,6 +47,7 @@ describe("config", () => {
 			summaryModel: "openai/gpt-4o-mini",
 			judgeModel: "anthropic/claude-sonnet-4-5",
 			artifactRoot: "tmp/slipstream",
+			retainArtifacts: true,
 			statsFullPaths: true,
 		});
 
@@ -75,6 +77,7 @@ describe("config", () => {
 		assert.equal(cfg.summaryModel, "openai/gpt-4o-mini");
 		assert.equal(cfg.judgeModel, "anthropic/claude-sonnet-4-5");
 		assert.equal(cfg.artifactRoot, "tmp/slipstream");
+		assert.equal(cfg.retainArtifacts, true);
 		assert.equal(cfg.statsFullPaths, true);
 		assert.equal(DEFAULT_CONFIG.autoTrigger, true);
 	});

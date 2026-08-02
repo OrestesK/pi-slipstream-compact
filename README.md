@@ -16,7 +16,7 @@ Install it, then keep using Pi normally.
 - When you run `/compact`, Pi uses Slipstream's reviewed summary instead of native compaction.
 - Automatic compaction uses the same review step.
 - If the summary misses important state, Slipstream tries to repair it before compaction.
-- Recovery artifacts are saved under `.scratch/compactions` in case you need to inspect what happened.
+- Recovery artifacts are temporary by default. Set `retainArtifacts: true` to keep completed runs for inspection.
 
 ## Install
 
@@ -43,11 +43,11 @@ After installing, keep using Pi normally.
 | Let compaction happen automatically                   | Nothing. Background preparation is enabled by default and starts when the session gets large.                  |
 | Compact manually                                      | Run `/compact`.                                                                                                |
 | See Slipstream state                                  | Watch the compact widget above the prompt while Slipstream is active, or run `/slipstream status` for details. |
-| Find recovery artifacts                               | Run `/slipstream artifacts`.                                                                                   |
+| Inspect pending or retained artifacts                 | Run `/slipstream artifacts`. Set `retainArtifacts: true` to keep completed runs.                               |
 | Turn off background preparation while testing         | Set `autoTrigger: false`; `/compact` still uses Slipstream while the package is enabled.                       |
 | Keep another extension or native Pi owning `/compact` | Set `replaceDefaultCompact: false`; use `/slipstream compact` only when you explicitly want Slipstream.        |
 
-Before using it on a real repository, make sure `.scratch/` is gitignored. Slipstream writes local recovery artifacts under `.scratch/compactions`.
+Before using it on a real repository, make sure `.scratch/` is gitignored. Slipstream writes temporary recovery state under `.scratch/compactions`.
 
 ## Default behavior and settings
 
@@ -58,7 +58,8 @@ Default config is intentionally small:
 	"pi-slipstream-compact": {
 		"enabled": true,
 		"autoTrigger": true,
-		"artifactRoot": ".scratch/compactions"
+		"artifactRoot": ".scratch/compactions",
+		"retainArtifacts": false
 	}
 }
 ```
@@ -74,7 +75,8 @@ Important defaults:
 | `judgeThreshold`        |                    `7` | Minimum continuation-quality score before normal acceptance.                                      |
 | `repairAttempts`        |                    `3` | Tries full-summary repair after judge rejection.                                                  |
 | `rejectedSummaryMode`   |                `"ask"` | Shows an interactive decision when possible; accepts on timeout/no UI unless explicitly rejected. |
-| `artifactRoot`          | `.scratch/compactions` | Local recovery artifact directory inside the current project.                                     |
+| `artifactRoot`          | `.scratch/compactions` | Local temporary recovery directory inside the current project.                                    |
+| `retainArtifacts`       |                `false` | Keeps completed recovery artifacts only when explicitly set to `true`.                            |
 | `statsFullPaths`        |                `false` | Central stats redact paths by default; set `true` only for explicit local debugging.              |
 | `summaryModel`          |           active model | Uses your active Pi model unless overridden.                                                      |
 | `judgeModel`            |           active model | Uses your active Pi model unless overridden.                                                      |
@@ -86,6 +88,8 @@ See [Full configuration](#full-configuration) for all settings and model overrid
 You do not need these commands for normal use. They are for checking a new install before relying on it.
 
 A safe evaluation ladder:
+
+Set `retainArtifacts: true` while evaluating if you want to inspect generated files after a run finishes.
 
 1. Inspect the prompt and local evidence without judging or compacting:
 
@@ -109,7 +113,7 @@ A safe evaluation ladder:
    /slipstream compact --adopt
    ```
 
-Prepared summaries expire after `pendingTtlMs` (default: 5 minutes) and are rejected if the session branch advances too far. Old `candidate-summary.md` and `judge.json` files are still useful for inspection, but they are not enough for `/slipstream compact --adopt`; rerun `--prepare` if the pending summary expired.
+Prepared summaries expire after `pendingTtlMs` (default: 5 minutes) and are rejected if the session branch advances too far. With `retainArtifacts: true`, old `candidate-summary.md` and `judge.json` files remain useful for inspection, but they are not enough for `/slipstream compact --adopt`; rerun `--prepare` if the pending summary expired. A hard crash or generation failure before terminal cleanup can leave an orphan run because startup recovery does not delete directories that may belong to another live writer.
 
 ## Native compact vs Slipstream
 
@@ -249,14 +253,14 @@ pi install /absolute/path/to/pi-slipstream-compact
 /slipstream compact --adopt
 ```
 
-| Command                         | Effect                                                                                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/slipstream status`            | Shows idle/running/pending/failed state and pending judge details.                                                                                           |
-| `/slipstream artifacts`         | Shows the latest artifact directory remembered by the current session, if any. If it shows nothing after a restart, browse `.scratch/compactions/` directly. |
-| `/slipstream compact`           | Generates, reviews, and immediately queues Slipstream compaction.                                                                                            |
-| `/slipstream compact --dry-run` | Writes artifacts and a candidate prompt without changing compaction state.                                                                                   |
-| `/slipstream compact --prepare` | Expert mode: generates, judges, possibly repairs, and stores a validated pending summary without applying it.                                                |
-| `/slipstream compact --adopt`   | Expert mode: calls Pi compaction only if a validated pending summary exists; revalidates first if the branch advanced since preparation.                     |
+| Command                         | Effect                                                                                                                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `/slipstream status`            | Shows idle/running/pending/failed state and pending judge details.                                                                       |
+| `/slipstream artifacts`         | Shows temporary pending artifacts or the latest retained artifact directory.                                                             |
+| `/slipstream compact`           | Generates, reviews, and immediately queues Slipstream compaction.                                                                        |
+| `/slipstream compact --dry-run` | Builds a candidate prompt without changing compaction state; keeps its files only with `retainArtifacts: true`.                          |
+| `/slipstream compact --prepare` | Expert mode: generates, judges, possibly repairs, and stores a validated pending summary without applying it.                            |
+| `/slipstream compact --adopt`   | Expert mode: calls Pi compaction only if a validated pending summary exists; revalidates first if the branch advanced since preparation. |
 
 Unknown flags or positional arguments on `compact` are rejected instead of being ignored.
 
@@ -264,9 +268,9 @@ Local rollout:
 
 1. Plain Pi `/compact` and threshold compaction now use Slipstream by default through `session_before_compact`.
 2. `/slipstream compact` remains the explicit one-command support path.
-3. `--dry-run` writes prompts and artifacts without changing session state.
+3. `--dry-run` builds the prompt without changing session state; set `retainArtifacts: true` to keep its files.
 4. `--prepare` and `--adopt` remain expert inspect-before-apply workflows; rerun `--prepare` if the pending summary expires or becomes stale.
-5. Rejected Slipstream summaries are policy-accepted with score and artifacts instead of falling back to native compaction; `ask` mode shows a scored confirmation dialog when UI is available, accepts on timeout/no response, and rejects only when the user explicitly selects Reject.
+5. Rejected Slipstream summaries are policy-accepted with their score instead of falling back to native compaction; retained artifacts are available only with `retainArtifacts: true`. `ask` mode shows a scored confirmation dialog when UI is available, accepts on timeout/no response, and rejects only when the user explicitly selects Reject.
 
 ## Full configuration
 
@@ -279,7 +283,8 @@ Default-style configuration:
 	"pi-slipstream-compact": {
 		"enabled": true,
 		"autoTrigger": true,
-		"artifactRoot": ".scratch/compactions"
+		"artifactRoot": ".scratch/compactions",
+		"retainArtifacts": false
 	}
 }
 ```
@@ -335,6 +340,7 @@ Tuned local configuration example:
 		"rejectedSummaryMode": "ask",
 		"pendingTtlMs": 300000,
 		"artifactRoot": ".scratch/compactions",
+		"retainArtifacts": false,
 		"statsFullPaths": false
 	}
 }
@@ -353,6 +359,7 @@ Tuned local configuration example:
 | `rejectedSummaryMode`   |                `"ask"` | Rejected-summary handling after repairs fail: `"ask"` shows score/diagnostics/summary preview when UI selection is available and accepts on timeout/no response unless the user explicitly rejects, `"reject"` cancels compaction, and `"accept"` accepts immediately.                                                                         |
 | `pendingTtlMs`          |               `300000` | Expiry for a prepared pending summary.                                                                                                                                                                                                                                                                                                         |
 | `artifactRoot`          | `.scratch/compactions` | Local artifact directory, resolved against Pi's current project cwd; paths outside the project are rejected, including existing symlinks that resolve outside the project.                                                                                                                                                                     |
+| `retainArtifacts`       |                `false` | Deletes terminal run artifacts; set `true` to preserve completed runs for debugging.                                                                                                                                                                                                                                                           |
 | `statsFullPaths`        |                `false` | Central performance stats store `cwd: "."` and relative/redacted artifact paths by default. Set `true` only when you explicitly want full local paths in `~/.config/pi/.scratch/slipstream-stats`.                                                                                                                                             |
 | `summaryModel`          |           active model | Optional `provider/model-id` override for summary generation.                                                                                                                                                                                                                                                                                  |
 | `judgeModel`            |           active model | Optional `provider/model-id` override for judging.                                                                                                                                                                                                                                                                                             |

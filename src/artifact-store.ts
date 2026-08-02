@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import {
 	appendFile,
+	lstat,
 	mkdir,
 	mkdtemp,
 	readFile,
+	realpath,
 	rename,
+	rm,
 	unlink,
 	writeFile,
 } from "node:fs/promises";
@@ -362,11 +365,16 @@ export class ArtifactStore {
 				throw error;
 			dir = await mkdtemp(`${baseDir}-`);
 		}
-		await writeFile(
-			join(dir, "run.json"),
-			`${JSON.stringify({ id, sessionId: input.sessionId, triggerEntryId: input.triggerEntryId, cwd: input.cwd }, null, 2)}\n`,
-			"utf8",
-		);
+		try {
+			await writeFile(
+				join(dir, "run.json"),
+				`${JSON.stringify({ id, sessionId: input.sessionId, triggerEntryId: input.triggerEntryId, cwd: input.cwd }, null, 2)}\n`,
+				"utf8",
+			);
+		} catch (error) {
+			await rm(dir, { recursive: true, force: true });
+			throw error;
+		}
 		return {
 			id,
 			dir,
@@ -374,6 +382,66 @@ export class ArtifactStore {
 			triggerEntryId: input.triggerEntryId,
 			cwd: input.cwd,
 		};
+	}
+
+	private async ownedRunPath(
+		runDir: string,
+		expected: Pick<ArtifactRunInput, "sessionId" | "cwd">,
+	): Promise<string> {
+		const target = resolve(runDir);
+		const rel = relative(this.root, target);
+		if (
+			rel === "" ||
+			rel.startsWith("..") ||
+			isAbsolute(rel) ||
+			rel.includes("/") ||
+			rel.includes("\\")
+		)
+			throw new Error("Artifact run must be a direct child of its store root");
+		const targetStat = await lstat(target);
+		if (!targetStat.isDirectory() || targetStat.isSymbolicLink())
+			throw new Error("Artifact run target is not a real directory");
+		const [realRoot, realTarget] = await Promise.all([
+			realpath(this.root),
+			realpath(target),
+		]);
+		if (relative(realRoot, realTarget) !== rel)
+			throw new Error("Artifact run resolves outside its store root");
+		const metadata = JSON.parse(
+			await readFile(join(realTarget, "run.json"), "utf8"),
+		);
+		if (
+			!isRecord(metadata) ||
+			metadata.sessionId !== expected.sessionId ||
+			metadata.cwd !== expected.cwd
+		)
+			throw new Error("Artifact run metadata does not match cleanup owner");
+		return realTarget;
+	}
+
+	async verifiedRunPath(
+		runDir: string,
+		expected: Pick<ArtifactRunInput, "sessionId" | "cwd">,
+	): Promise<string | null> {
+		try {
+			return await this.ownedRunPath(runDir, expected);
+		} catch {
+			return null;
+		}
+	}
+
+	async removeRun(
+		runDir: string,
+		expected: Pick<ArtifactRunInput, "sessionId" | "cwd">,
+	): Promise<void> {
+		try {
+			const target = await this.ownedRunPath(runDir, expected);
+			await rm(target, { recursive: true, force: true });
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT")
+				return;
+			throw error;
+		}
 	}
 
 	async writeTriggerSnapshot(

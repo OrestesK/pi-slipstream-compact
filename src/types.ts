@@ -299,6 +299,7 @@ export type PendingValidatedCompaction = {
 	validatedThroughEntryId: string | null;
 	tokensBefore: number | null;
 	details: Record<string, unknown>;
+	artifactDir: string;
 	expiresAt: number;
 };
 
@@ -328,6 +329,7 @@ export type AutoJob = {
 	firstKeptEntryId: string | null;
 	tokensBefore: number | null;
 	artifactDir: string;
+	artifactRoot: string;
 	summaryArtifactRefs: string[];
 	continuation: {
 		appendTurn(event: {

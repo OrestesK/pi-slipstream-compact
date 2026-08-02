@@ -34,6 +34,7 @@ export type DryRunInput = {
 	contextUsage?: ContextUsageSnapshot;
 	executeGit?: ExecuteGitFn;
 	statsFullPaths?: boolean;
+	retainArtifacts: boolean;
 	onProgress?: ProgressSink;
 	signal?: AbortSignal;
 };
@@ -142,8 +143,12 @@ export async function runSlipstreamDryRun(
 		...collectedState.evidence,
 		git: {
 			...collectedState.evidence.git,
-			fullDiffArtifactPaths: gitSnapshot.diffChunkPaths,
-			fullDiffPreserved: gitSnapshot.fullDiffPreserved,
+			fullDiffArtifactPaths: input.retainArtifacts
+				? gitSnapshot.diffChunkPaths
+				: [],
+			fullDiffPreserved: input.retainArtifacts
+				? gitSnapshot.fullDiffPreserved
+				: false,
 		},
 	};
 	const stateArtifact = await store.writeStateEvidence(run, stateEvidence);
@@ -152,7 +157,7 @@ export async function runSlipstreamDryRun(
 		message: "Building candidate summary prompt",
 	});
 	const candidatePrompt = buildSummaryPrompt(snapshot, {
-		artifactRefs: [run.dir, stateArtifact.path],
+		artifactRefs: input.retainArtifacts ? [run.dir, stateArtifact.path] : [],
 		stateEvidence,
 		maxConversationChars: resolveMaxConversationChars(input.contextUsage),
 	});
@@ -275,8 +280,12 @@ export async function runValidatedSlipstream(
 		...collectedState.evidence,
 		git: {
 			...collectedState.evidence.git,
-			fullDiffArtifactPaths: gitSnapshot.diffChunkPaths,
-			fullDiffPreserved: gitSnapshot.fullDiffPreserved,
+			fullDiffArtifactPaths: input.retainArtifacts
+				? gitSnapshot.diffChunkPaths
+				: [],
+			fullDiffPreserved: input.retainArtifacts
+				? gitSnapshot.fullDiffPreserved
+				: false,
 		},
 	};
 	const stateArtifact = await store.writeStateEvidence(run, stateEvidence);
@@ -287,7 +296,9 @@ export async function runValidatedSlipstream(
 		message: "Generating candidate summary",
 	});
 	await yieldBeforeHeavyCompactionWork();
-	const summaryArtifactRefs = [run.dir, stateArtifact.path];
+	const summaryArtifactRefs = input.retainArtifacts
+		? [run.dir, stateArtifact.path]
+		: [];
 	const summaryMaxConversationChars = resolveMaxConversationChars(
 		input.contextUsage,
 	);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { DEFAULT_CONFIG } from "../src/config.ts";
@@ -90,6 +90,7 @@ describe("default compaction replacement", () => {
 				false,
 			);
 			assert.equal(state.status, "idle");
+			assert.deepEqual(await readdir(root), []);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}

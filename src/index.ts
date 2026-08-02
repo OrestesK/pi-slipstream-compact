@@ -19,11 +19,13 @@ import { buildContinuationFromBranch } from "./continuation.ts";
 import { loadSettings } from "./config.ts";
 import {
 	acceptRejectedSummaryByPolicy,
-	clearPendingArtifact,
+	disposePendingArtifact,
 	handleSlipstreamCommand,
 	persistPendingArtifact,
 	recoverPendingArtifact,
+	removeArtifactRun,
 	resolveArtifactRoot,
+	schedulePendingExpiryCleanup,
 } from "./commands.ts";
 import {
 	runValidatedSlipstream,
@@ -37,6 +39,7 @@ import {
 	consumePendingForCompaction,
 	createRuntimeState,
 	hasActiveProgressOwner,
+	isPendingExpired,
 	activeSlipstreamCompactionRequest,
 	clearSlipstreamCompactionRequest,
 	ownsProgress,
@@ -289,16 +292,18 @@ export async function buildDefaultSlipstreamCompaction(
 	const makeSummaryCompleter =
 		deps.createSummaryCompleter ?? createSummaryCompleter;
 	const makeJudgeCompleter = deps.createJudgeCompleter ?? createJudgeCompleter;
+	const artifactRoot = await resolveArtifactRoot(cwd, config.artifactRoot);
 	const result = await runValidatedSlipstream({
 		branchEntries,
 		sessionId,
 		cwd,
-		artifactRoot: await resolveArtifactRoot(cwd, config.artifactRoot),
+		artifactRoot,
 		firstKeptEntryId: event.preparation.firstKeptEntryId,
 		tokensBefore: event.preparation.tokensBefore,
 		contextUsage,
 		continuation,
 		statsFullPaths: config.statsFullPaths,
+		retainArtifacts: config.retainArtifacts,
 		completeSummary: makeSummaryCompleter(
 			{ model: ctx.model, modelRegistry: ctx.modelRegistry },
 			config.summaryModel,
@@ -312,7 +317,7 @@ export async function buildDefaultSlipstreamCompaction(
 		onProgress,
 		signal: event.signal ?? ctx.signal,
 	});
-	state.lastArtifactDir = result.artifactDir;
+	state.lastArtifactDir = config.retainArtifacts ? result.artifactDir : null;
 	state.lastJudge = result.judge;
 	const rejectedAcceptance =
 		!result.accepted && result.firstKeptEntryId
@@ -320,6 +325,7 @@ export async function buildDefaultSlipstreamCompaction(
 					ctx,
 					result,
 					config.rejectedSummaryMode,
+					config.retainArtifacts,
 				)
 			: null;
 	if (
@@ -327,14 +333,18 @@ export async function buildDefaultSlipstreamCompaction(
 		!result.firstKeptEntryId
 	) {
 		state.status = "rejected";
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
 		safeNotify(
 			ctx,
-			`Slipstream default compaction could not produce a compaction summary. Score ${result.judge.score}. ${result.judge.diagnosis || "score " + result.judge.score}. Artifacts: ${result.artifactDir}`,
+			`Slipstream default compaction could not produce a compaction summary. Score ${result.judge.score}. ${result.judge.diagnosis || "score " + result.judge.score}.${config.retainArtifacts ? ` Artifacts: ${result.artifactDir}` : ""}`,
 			"warning",
 		);
 		return { cancel: true };
 	}
 	state.status = "idle";
+	if (!config.retainArtifacts)
+		await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
 	return {
 		compaction: {
 			summary: result.summary,
@@ -342,7 +352,7 @@ export async function buildDefaultSlipstreamCompaction(
 			tokensBefore: event.preparation.tokensBefore,
 			details: {
 				judge: result.judge,
-				artifacts: [result.artifactDir],
+				...(config.retainArtifacts ? { artifacts: [result.artifactDir] } : {}),
 				repaired: result.repaired,
 				manualOverride: rejectedAcceptance?.confirmed ?? false,
 				rejectedSummaryAccepted: !result.accepted,
@@ -495,6 +505,7 @@ async function revalidatePendingForCurrentHead(
 		contextUsage,
 		continuation,
 		statsFullPaths: config.statsFullPaths,
+		retainArtifacts: config.retainArtifacts,
 		completeSummary: createSummaryCompleter(
 			{ model: ctx.model, modelRegistry: ctx.modelRegistry },
 			config.summaryModel,
@@ -508,9 +519,12 @@ async function revalidatePendingForCurrentHead(
 		onProgress,
 		signal: ctx.signal,
 	});
-	if (state.pending !== stalePending || state.status !== "ready_to_adopt")
+	if (state.pending !== stalePending || state.status !== "ready_to_adopt") {
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
 		return false;
-	state.lastArtifactDir = result.artifactDir;
+	}
+	state.lastArtifactDir = config.retainArtifacts ? result.artifactDir : null;
 	state.lastJudge = result.judge;
 	if (
 		!result.firstKeptEntryId ||
@@ -518,6 +532,13 @@ async function revalidatePendingForCurrentHead(
 	) {
 		state.pending = null;
 		state.status = "rejected";
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
+		await disposePendingArtifact(
+			stalePending,
+			artifactRoot,
+			config.retainArtifacts,
+		);
 		return false;
 	}
 	const pending = {
@@ -530,19 +551,41 @@ async function revalidatePendingForCurrentHead(
 		tokensBefore: result.tokensBefore ?? stalePending.tokensBefore,
 		details: {
 			judge: result.judge,
-			artifacts: [result.artifactDir],
+			...(config.retainArtifacts ? { artifacts: [result.artifactDir] } : {}),
 			repaired: result.repaired,
 			auto: true,
 			rejectedSummaryAccepted: !result.accepted,
 			rejectedSummaryMode: config.rejectedSummaryMode,
 			revalidatedFromEntryId: stalePending.validatedThroughEntryId,
 		},
+		artifactDir: result.artifactDir,
 		expiresAt: Date.now() + config.pendingTtlMs,
 	};
-	await persistPendingArtifact(result.artifactDir, pending);
-	if (state.pending !== stalePending || state.status !== "ready_to_adopt")
+	try {
+		await persistPendingArtifact(result.artifactDir, pending);
+	} catch (error) {
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
+		throw error;
+	}
+	if (state.pending !== stalePending || state.status !== "ready_to_adopt") {
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
 		return false;
+	}
 	storePendingValidated(state, pending);
+	schedulePendingExpiryCleanup(
+		state,
+		pending,
+		artifactRoot,
+		config.retainArtifacts,
+		Date.now,
+	);
+	await disposePendingArtifact(
+		stalePending,
+		artifactRoot,
+		config.retainArtifacts,
+	);
 	return true;
 }
 
@@ -571,6 +614,34 @@ export function registerLifecycle(
 		canAdoptAtTurnBoundary: boolean;
 	} | null = null;
 	const busyIdleRetryDelayMs = 50;
+	const retireAutoJob = (job: RuntimeState["autoJob"]): void => {
+		if (!job || config.retainArtifacts) return;
+		void job.summaryPromise
+			.catch(() => undefined)
+			.then(async () => {
+				if (job.finalizing) return;
+				if (state.pending?.artifactDir === job.artifactDir) return;
+				await removeArtifactRun(
+					job.artifactRoot,
+					job.artifactDir,
+					job.sessionId,
+					job.cwd,
+				);
+			})
+			.catch(() => {
+				state.status = "failed";
+			});
+	};
+	const retirePending = (pending: RuntimeState["pending"]): void => {
+		if (!pending) return;
+		void resolveArtifactRoot(pending.cwd, config.artifactRoot)
+			.then((artifactRoot) =>
+				disposePendingArtifact(pending, artifactRoot, config.retainArtifacts),
+			)
+			.catch(() => {
+				state.status = "failed";
+			});
+	};
 	const clearDeferredIdleRetry = (): void => {
 		if (deferredIdleRetry === null) return;
 		clearTimeout(deferredIdleRetry);
@@ -581,6 +652,7 @@ export function registerLifecycle(
 		if (!job || (job.sessionId === sessionId && job.cwd === cwd)) return false;
 		if (state.activePromise === job.summaryPromise) state.activePromise = null;
 		state.autoJob = null;
+		retireAutoJob(job);
 		state.status = state.pending ? "ready_to_adopt" : "idle";
 		return true;
 	};
@@ -593,8 +665,10 @@ export function registerLifecycle(
 		clearDeferredIdleRetry();
 		cancelTurnBoundaryWork();
 		clearActiveProgressOwner(state);
+		const retiredJob = state.autoJob;
 		state.activePromise = null;
 		state.autoJob = null;
+		retireAutoJob(retiredJob);
 		state.compactionWanted = false;
 		clearSlipstreamCompactionRequest(state);
 
@@ -607,7 +681,9 @@ export function registerLifecycle(
 			validatedThroughEntryId = currentValidatedThroughEntryId(ctx, config);
 		} catch (error) {
 			ignoreStaleContextError(error);
+			const retiredPending = state.pending;
 			state.pending = null;
+			retirePending(retiredPending);
 			state.status = "idle";
 			clearSlipstreamWidget(ctx);
 			restorePersistentStatus(ctx, state, config);
@@ -620,9 +696,10 @@ export function registerLifecycle(
 			(pending.sessionId !== sessionId ||
 				pending.cwd !== cwd ||
 				pending.validatedThroughEntryId !== validatedThroughEntryId ||
-				Date.now() > pending.expiresAt)
+				isPendingExpired(pending, Date.now()))
 		) {
 			state.pending = null;
+			retirePending(pending);
 		}
 		state.status = state.pending ? "ready_to_adopt" : "idle";
 		restorePersistentStatus(ctx, state, config);
@@ -978,19 +1055,31 @@ export function registerLifecycle(
 				updateSlipstreamWidget(ctx, state, config);
 				await yieldForUiPaint();
 				const sessionId = ctx.sessionManager.getSessionId?.() ?? "unknown";
+				const artifactRoot = await resolveArtifactRoot(
+					ctx.cwd,
+					config.artifactRoot,
+				);
 				const recovered = await recoverPendingArtifact(
-					await resolveArtifactRoot(ctx.cwd, config.artifactRoot),
+					artifactRoot,
 					sessionId,
 					ctx.cwd,
 					Date.now(),
 					config.pendingTtlMs,
+					config.retainArtifacts,
 				);
-				if (
-					recovered &&
-					recovered.validatedThroughEntryId ===
+				if (recovered) {
+					if (
+						recovered.validatedThroughEntryId ===
 						currentValidatedThroughEntryId(ctx, config)
-				) {
-					storePendingValidated(state, recovered);
+					)
+						storePendingValidated(state, recovered);
+					schedulePendingExpiryCleanup(
+						state,
+						recovered,
+						artifactRoot,
+						config.retainArtifacts,
+						Date.now,
+					);
 				}
 				updateSlipstreamWidget(ctx, state, config);
 			} else clearSlipstreamWidget(ctx);
@@ -1005,8 +1094,10 @@ export function registerLifecycle(
 		queuedTurnBoundaryWork = null;
 		clearActiveProgressOwner(state);
 		clearSlipstreamWidget(ctx);
+		const retiredJob = state.autoJob;
 		state.activePromise = null;
 		state.autoJob = null;
+		retireAutoJob(retiredJob);
 		state.pending = null;
 		state.compactionWanted = false;
 		clearSlipstreamCompactionRequest(state);
@@ -1058,10 +1149,17 @@ export function registerLifecycle(
 		if (!config.enabled) return;
 		clearDeferredIdleRetry();
 		clearActiveProgressOwner(state);
+		const retiredJob = state.autoJob;
 		state.activePromise = null;
 		state.autoJob = null;
+		retireAutoJob(retiredJob);
 		clearSlipstreamCompactionRequest(state);
-		if (state.pending) await clearPendingArtifact(state.pending);
+		if (state.pending)
+			await disposePendingArtifact(
+				state.pending,
+				await resolveArtifactRoot(ctx.cwd, config.artifactRoot),
+				config.retainArtifacts,
+			);
 		state.pending = null;
 		state.compactionWanted = false;
 		state.status = "idle";
@@ -1091,7 +1189,11 @@ export function registerLifecycle(
 		if (requestedCompaction && !explicitRequest) {
 			clearSlipstreamCompactionRequest(state, requestedCompaction);
 			if (pendingBeforeConsume)
-				await clearPendingArtifact(pendingBeforeConsume);
+				await disposePendingArtifact(
+					pendingBeforeConsume,
+					await resolveArtifactRoot(cwd, config.artifactRoot),
+					config.retainArtifacts,
+				);
 			state.pending = null;
 			state.status = "idle";
 			restorePersistentStatus(ctx, state, config);
@@ -1114,7 +1216,11 @@ export function registerLifecycle(
 			clearSlipstreamCompactionRequest(state, explicitRequest ?? undefined);
 			clearDeferredIdleRetry();
 			if (pendingBeforeConsume)
-				await clearPendingArtifact(pendingBeforeConsume);
+				await disposePendingArtifact(
+					pendingBeforeConsume,
+					await resolveArtifactRoot(cwd, config.artifactRoot),
+					config.retainArtifacts,
+				);
 			state.status = "summarizing";
 			try {
 				ctx.ui?.setStatus?.(
@@ -1135,7 +1241,11 @@ export function registerLifecycle(
 		if (explicitRequest) {
 			clearSlipstreamCompactionRequest(state, explicitRequest);
 			if (pendingBeforeConsume)
-				await clearPendingArtifact(pendingBeforeConsume);
+				await disposePendingArtifact(
+					pendingBeforeConsume,
+					await resolveArtifactRoot(cwd, config.artifactRoot),
+					config.retainArtifacts,
+				);
 			restorePersistentStatus(ctx, state, config);
 			return { cancel: true };
 		}

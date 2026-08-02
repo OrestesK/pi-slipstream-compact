@@ -1,10 +1,13 @@
 import { ArtifactStore } from "./artifact-store.ts";
-import { persistPendingArtifact } from "./commands.ts";
+import {
+	persistPendingArtifact,
+	schedulePendingExpiryCleanup,
+} from "./commands.ts";
 import { resolveMaxConversationChars } from "./config.ts";
 import { ContinuationBuffer } from "./continuation.ts";
 import { buildJudgePrompt, isAccepted } from "./judge.ts";
 import { buildRepairPrompt } from "./repair.ts";
-import { storePendingValidated } from "./session-state.ts";
+import { isPendingExpired, storePendingValidated } from "./session-state.ts";
 import { buildSnapshotAsync } from "./snapshot.ts";
 import {
 	collectStateEvidenceWithRaw,
@@ -122,7 +125,7 @@ function clearMismatchedPending(
 	match?: PendingFreshnessMatch,
 ): void {
 	if (!state.pending || state.status !== "ready_to_adopt") return;
-	if (match?.now !== undefined && match.now > state.pending.expiresAt) {
+	if (match?.now !== undefined && isPendingExpired(state.pending, match.now)) {
 		state.pending = null;
 		state.status = "idle";
 		return;
@@ -279,17 +282,24 @@ export async function startAutoJob(
 		...collectedState.evidence,
 		git: {
 			...collectedState.evidence.git,
-			fullDiffArtifactPaths: gitSnapshot.diffChunkPaths,
-			fullDiffPreserved: gitSnapshot.fullDiffPreserved,
+			fullDiffArtifactPaths: input.config.retainArtifacts
+				? gitSnapshot.diffChunkPaths
+				: [],
+			fullDiffPreserved: input.config.retainArtifacts
+				? gitSnapshot.fullDiffPreserved
+				: false,
 		},
 	};
 	const stateArtifact = await store.writeStateEvidence(run, stateEvidence);
 	timingsMs.stateEvidence = elapsedMs(stateEvidenceStartedAt);
 	if (input.isCurrent?.() === false) {
 		input.state.compactionWanted = false;
+		if (!input.config.retainArtifacts) await store.removeRun(run.dir, input);
 		return null;
 	}
-	const summaryArtifactRefs = [run.dir, stateArtifact.path];
+	const summaryArtifactRefs = input.config.retainArtifacts
+		? [run.dir, stateArtifact.path]
+		: [];
 	const continuation = new ContinuationBuffer({
 		minTurns: input.config.minContinuationTurns,
 		maxTurns: input.config.maxContinuationTurns,
@@ -327,6 +337,7 @@ export async function startAutoJob(
 		firstKeptEntryId: snapshot.firstKeptEntryId,
 		tokensBefore: snapshot.tokensBefore,
 		artifactDir: run.dir,
+		artifactRoot: input.artifactRoot,
 		summaryArtifactRefs,
 		continuation,
 		summaryPromise,
@@ -338,7 +349,7 @@ export async function startAutoJob(
 	input.state.autoJob = job;
 	input.state.activePromise = summaryPromise;
 	input.state.compactionWanted = false;
-	input.state.lastArtifactDir = run.dir;
+	input.state.lastArtifactDir = input.config.retainArtifacts ? run.dir : null;
 	input.state.status = "awaiting_continuation";
 	void summaryPromise.then(
 		() => {
@@ -367,18 +378,18 @@ export async function finalizeAutoJob(
 		message: "Waiting for auto summary to finish",
 	});
 	const isInvalidated = (): boolean => input.state.autoJob !== job;
+	const store = new ArtifactStore({
+		root: job.artifactRoot,
+		statsFullPaths: input.config.statsFullPaths,
+	});
+	const run = {
+		id: "final",
+		dir: job.artifactDir,
+		sessionId: job.sessionId,
+		triggerEntryId: null,
+		cwd: job.cwd,
+	};
 	try {
-		const store = new ArtifactStore({
-			root: job.artifactDir,
-			statsFullPaths: input.config.statsFullPaths,
-		});
-		const run = {
-			id: "final",
-			dir: job.artifactDir,
-			sessionId: job.sessionId,
-			triggerEntryId: null,
-			cwd: job.cwd,
-		};
 		const writeStats = async (
 			outcome: "accepted" | "rejected" | "failed",
 			accepted: boolean,
@@ -449,7 +460,9 @@ export async function finalizeAutoJob(
 			...job.snapshot,
 			manifest: {
 				...job.snapshot.manifest,
-				artifactRefs: [...job.snapshot.manifest.artifactRefs, job.artifactDir],
+				artifactRefs: input.config.retainArtifacts
+					? [...job.snapshot.manifest.artifactRefs, job.artifactDir]
+					: job.snapshot.manifest.artifactRefs,
 			},
 		};
 		const completeJudgeWithRetry = async (
@@ -636,16 +649,26 @@ export async function finalizeAutoJob(
 			tokensBefore: job.tokensBefore,
 			details: {
 				judge,
-				artifacts: [job.artifactDir],
+				...(input.config.retainArtifacts
+					? { artifacts: [job.artifactDir] }
+					: {}),
 				auto: true,
 				rejectedSummaryAccepted: !accepted,
 				rejectedSummaryMode: input.config.rejectedSummaryMode,
 			},
+			artifactDir: job.artifactDir,
 			expiresAt: input.now() + input.config.pendingTtlMs,
 		};
 		await persistPendingArtifact(job.artifactDir, pending);
 		if (isInvalidated()) return false;
 		storePendingValidated(input.state, pending);
+		schedulePendingExpiryCleanup(
+			input.state,
+			pending,
+			job.artifactRoot,
+			input.config.retainArtifacts,
+			input.now,
+		);
 		await store.writeAdoptionRecord(run, {
 			firstKeptEntryId: job.firstKeptEntryId,
 			tokensBefore: job.tokensBefore,
@@ -661,10 +684,16 @@ export async function finalizeAutoJob(
 		input.state.autoJob = null;
 		return true;
 	} catch (error) {
-		job.finalizing = false;
 		if (isInvalidated()) return false;
 		if (input.state.autoJob === job) input.state.autoJob = null;
 		input.state.status = "failed";
 		throw error;
+	} finally {
+		job.finalizing = false;
+		if (
+			!input.config.retainArtifacts &&
+			input.state.pending?.artifactDir !== job.artifactDir
+		)
+			await store.removeRun(job.artifactDir, job);
 	}
 }

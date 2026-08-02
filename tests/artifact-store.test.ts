@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import {
+	access,
+	mkdtemp,
+	mkdir,
+	readFile,
+	readdir,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ArtifactStore, createRunId } from "../src/artifact-store.ts";
@@ -356,6 +364,30 @@ describe("artifact store", () => {
 			assert.deepEqual(
 				runFiles.filter((file) => file.startsWith("trigger-raw-")),
 				[],
+			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("removes only a verified direct-child run", async () => {
+		const parent = join(process.cwd(), ".scratch", "test-tmp");
+		await mkdir(parent, { recursive: true });
+		const root = await mkdtemp(join(parent, "slipstream-remove-"));
+		try {
+			const store = new ArtifactStore({ root });
+			const run = await store.createRun(SAMPLE);
+			await Promise.all([
+				store.removeRun(run.dir, SAMPLE),
+				store.removeRun(run.dir, SAMPLE),
+			]);
+			await assert.rejects(() => access(run.dir));
+
+			const tampered = await store.createRun(SAMPLE);
+			await writeFile(join(tampered.dir, "run.json"), "{}\n");
+			await assert.rejects(
+				() => store.removeRun(tampered.dir, SAMPLE),
+				/metadata does not match/,
 			);
 		} finally {
 			await rm(root, { recursive: true, force: true });

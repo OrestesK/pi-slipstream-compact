@@ -21,7 +21,7 @@ import {
 } from "./config.ts";
 import { buildContinuationFromBranch } from "./continuation.ts";
 import { createJudgeCompleter, createSummaryCompleter } from "./model.ts";
-import { sanitizePart } from "./artifact-store.ts";
+import { ArtifactStore, sanitizePart } from "./artifact-store.ts";
 import {
 	runSlipstreamDryRun,
 	runValidatedSlipstream,
@@ -30,6 +30,7 @@ import {
 import {
 	adoptPending,
 	hasActiveProgressOwner,
+	isPendingExpired,
 	ownsProgress,
 	releaseProgressOwner,
 	storePendingValidated,
@@ -286,15 +287,19 @@ export function handleAdoptCommand(
 	};
 }
 
-function summaryPreview(summary: string): string {
+function summaryPreview(summary: string, retainArtifacts: boolean): string {
 	const trimmed = summary.trim();
 	const maxChars = 4_000;
 	if (trimmed.length <= maxChars) return trimmed || "[empty summary]";
-	return `${trimmed.slice(0, maxChars)}\n\n[summary preview truncated; full summary is stored in artifacts]`;
+	const suffix = retainArtifacts
+		? "[summary preview truncated; full summary is stored in artifacts]"
+		: "[summary preview truncated]";
+	return `${trimmed.slice(0, maxChars)}\n\n${suffix}`;
 }
 
 export function rejectedSummaryDecisionText(
 	result: ValidatedRunResult,
+	retainArtifacts: boolean,
 ): string {
 	const missing = result.judge.missing.length
 		? result.judge.missing.map((item) => `- ${item}`).join("\n")
@@ -302,17 +307,29 @@ export function rejectedSummaryDecisionText(
 	const contradictions = result.judge.contradictions.length
 		? result.judge.contradictions.map((item) => `- ${item}`).join("\n")
 		: "- None";
-	return `Slipstream rejected the summary after all repair attempts.\n\nScore: ${result.judge.score}/10\nDecision: ${result.judge.decision}\nDiagnosis: ${result.judge.diagnosis || "n/a"}\nArtifacts: ${result.artifactDir}\n\nMissing:\n${missing}\n\nContradictions:\n${contradictions}\n\nCompaction summary preview:\n\n${summaryPreview(result.summary)}\n\nAccept this rejected summary anyway?`;
+	const artifactText = retainArtifacts
+		? `\nArtifacts: ${result.artifactDir}`
+		: "";
+	return `Slipstream rejected the summary after all repair attempts.\n\nScore: ${result.judge.score}/10\nDecision: ${result.judge.decision}\nDiagnosis: ${result.judge.diagnosis || "n/a"}${artifactText}\n\nMissing:\n${missing}\n\nContradictions:\n${contradictions}\n\nCompaction summary preview:\n\n${summaryPreview(result.summary, retainArtifacts)}\n\nAccept this rejected summary anyway?`;
 }
 
-function rejectedSummarySelectText(result: ValidatedRunResult): string {
+function rejectedSummarySelectText(
+	result: ValidatedRunResult,
+	retainArtifacts: boolean,
+): string {
 	const missing = result.judge.missing.length
 		? result.judge.missing.map((item) => `- ${item}`).join("\n")
 		: "- None";
 	const contradictions = result.judge.contradictions.length
 		? result.judge.contradictions.map((item) => `- ${item}`).join("\n")
 		: "- None";
-	return `Accept rejected Slipstream summary?\n\nScore: ${result.judge.score}/10\nDecision: ${result.judge.decision}\nDiagnosis: ${result.judge.diagnosis || "n/a"}\nArtifacts: ${result.artifactDir}\n\nMissing:\n${missing}\n\nContradictions:\n${contradictions}\n\nFull summary is stored in artifacts. Accept anyway?`;
+	const artifactText = retainArtifacts
+		? `\nArtifacts: ${result.artifactDir}`
+		: "";
+	const storageText = retainArtifacts
+		? "\n\nFull summary is stored in artifacts."
+		: "";
+	return `Accept rejected Slipstream summary?\n\nScore: ${result.judge.score}/10\nDecision: ${result.judge.decision}\nDiagnosis: ${result.judge.diagnosis || "n/a"}${artifactText}\n\nMissing:\n${missing}\n\nContradictions:\n${contradictions}${storageText} Accept anyway?`;
 }
 
 export type RejectedSummaryAcceptance = {
@@ -325,14 +342,15 @@ export async function acceptRejectedSummaryByPolicy(
 	ctx: ManualAcceptContext,
 	result: ValidatedRunResult,
 	mode: RejectedSummaryMode,
+	retainArtifacts: boolean,
 ): Promise<RejectedSummaryAcceptance> {
 	if (mode === "accept") return { accepted: true, confirmed: false, mode };
 	if (mode === "reject") return { accepted: false, confirmed: false, mode };
 	const title = `Accept rejected Slipstream summary? Score ${result.judge.score}/10`;
-	const message = rejectedSummaryDecisionText(result);
+	const message = rejectedSummaryDecisionText(result, retainArtifacts);
 	if (ctx.ui?.select) {
 		const selection = await ctx.ui.select(
-			rejectedSummarySelectText(result),
+			rejectedSummarySelectText(result, retainArtifacts),
 			["Accept", "Reject"],
 			{ timeout: 120_000 },
 		);
@@ -399,9 +417,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type PersistedPendingValidatedCompaction = Omit<
+	PendingValidatedCompaction,
+	"artifactDir"
+>;
+
 function parsePendingArtifact(
 	value: unknown,
-): PendingValidatedCompaction | null {
+): PersistedPendingValidatedCompaction | null {
 	if (!isRecord(value) || !isRecord(value.details)) return null;
 	const {
 		sessionId,
@@ -447,6 +470,7 @@ function createPendingValidatedCompaction({
 	expiresAt,
 	validatedThroughEntryId,
 	revalidatedFromEntryId,
+	retainArtifacts,
 }: {
 	sessionId: string;
 	cwd: string;
@@ -455,10 +479,11 @@ function createPendingValidatedCompaction({
 	expiresAt: number;
 	validatedThroughEntryId: string | null;
 	revalidatedFromEntryId?: string | null;
+	retainArtifacts: boolean;
 }): PendingValidatedCompaction {
 	const details: Record<string, unknown> = {
 		judge: result.judge,
-		artifacts: [result.artifactDir],
+		...(retainArtifacts ? { artifacts: [result.artifactDir] } : {}),
 		repaired: result.repaired,
 		manualOverride: rejectedAcceptance?.confirmed ?? false,
 		rejectedSummaryAccepted: !result.accepted,
@@ -475,6 +500,7 @@ function createPendingValidatedCompaction({
 		validatedThroughEntryId,
 		tokensBefore: result.tokensBefore,
 		details,
+		artifactDir: result.artifactDir,
 		expiresAt,
 	};
 }
@@ -498,14 +524,15 @@ export async function persistPendingArtifact(
 
 export async function clearPendingArtifact(
 	pending: PendingValidatedCompaction,
+	artifactRoot: string,
 ): Promise<void> {
-	const artifact = pending.details.artifacts;
-	if (!Array.isArray(artifact) || typeof artifact[0] !== "string") return;
-	const projectRoot = await realPathForContainment(pending.projectId);
-	const artifactDir = await realPathForContainment(resolve(artifact[0]));
-	const rel = relative(projectRoot, artifactDir);
-	if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) return;
-	const path = join(artifactDir, PENDING_ARTIFACT_NAME);
+	const store = new ArtifactStore({ root: artifactRoot });
+	const ownedRunPath = await store.verifiedRunPath(pending.artifactDir, {
+		sessionId: pending.sessionId,
+		cwd: pending.cwd,
+	});
+	if (!ownedRunPath) return;
+	const path = join(ownedRunPath, PENDING_ARTIFACT_NAME);
 	try {
 		await unlink(path);
 	} catch (error) {
@@ -517,12 +544,83 @@ export async function clearPendingArtifact(
 	}
 }
 
+export async function removeArtifactRun(
+	artifactRoot: string,
+	artifactDir: string,
+	sessionId: string,
+	cwd: string,
+): Promise<void> {
+	await new ArtifactStore({ root: artifactRoot }).removeRun(artifactDir, {
+		sessionId,
+		cwd,
+	});
+}
+
+export async function disposePendingArtifact(
+	pending: PendingValidatedCompaction,
+	artifactRoot: string,
+	retainArtifacts: boolean,
+): Promise<void> {
+	if (!retainArtifacts) {
+		await removeArtifactRun(
+			artifactRoot,
+			pending.artifactDir,
+			pending.sessionId,
+			pending.cwd,
+		);
+		return;
+	}
+	await clearPendingArtifact(pending, artifactRoot);
+}
+
+type PendingExpiryTimer = { unref?(): void };
+type RegisterPendingExpiryTimer = (
+	callback: () => void,
+	delayMs: number,
+) => PendingExpiryTimer;
+
+const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
+
+export function schedulePendingExpiryCleanup(
+	state: RuntimeState,
+	pending: PendingValidatedCompaction,
+	artifactRoot: string,
+	retainArtifacts: boolean,
+	now: () => number,
+	registerTimer: RegisterPendingExpiryTimer = (callback, delayMs) =>
+		setTimeout(callback, delayMs),
+): void {
+	function scheduleNext(): void {
+		const remainingMs = pending.expiresAt - now();
+		if (remainingMs <= 0) {
+			if (state.pending === pending) {
+				state.pending = null;
+				state.status = "idle";
+			}
+			void disposePendingArtifact(pending, artifactRoot, retainArtifacts).catch(
+				() => {
+					state.status = "failed";
+				},
+			);
+			return;
+		}
+		const timer = registerTimer(
+			scheduleNext,
+			Math.min(remainingMs, MAX_TIMEOUT_DELAY_MS),
+		);
+		timer.unref?.();
+	}
+
+	scheduleNext();
+}
+
 export async function recoverPendingArtifact(
 	artifactRoot: string,
 	sessionId: string,
 	cwd: string,
 	now: number,
 	pendingTtlMs: number,
+	retainArtifacts: boolean,
 ): Promise<PendingValidatedCompaction | null> {
 	if (!(await pathExists(artifactRoot))) return null;
 	let entries;
@@ -534,14 +632,16 @@ export async function recoverPendingArtifact(
 			{ cause: error },
 		);
 	}
+	const store = new ArtifactStore({ root: artifactRoot });
 	const sessionPrefix = `${sanitizePart(sessionId)}-`;
 	const candidates = entries
 		.filter(
 			(entry) => entry.isDirectory() && entry.name.startsWith(sessionPrefix),
 		)
 		.map((entry) => join(artifactRoot, entry.name, PENDING_ARTIFACT_NAME));
-	let newest: PendingValidatedCompaction | null = null;
+	const recoverable: PendingValidatedCompaction[] = [];
 	for (const candidate of candidates) {
+		const runDir = dirname(candidate);
 		let raw: string;
 		try {
 			raw = await readFile(candidate, "utf8");
@@ -555,30 +655,41 @@ export async function recoverPendingArtifact(
 				},
 			);
 		}
-		let pending: PendingValidatedCompaction | null = null;
+		let persisted: PersistedPendingValidatedCompaction | null = null;
 		try {
-			pending = parsePendingArtifact(JSON.parse(raw));
+			persisted = parsePendingArtifact(JSON.parse(raw));
 		} catch {
 			continue;
 		}
-		if (!pending) continue;
-		if (
-			pending.sessionId !== sessionId ||
-			pending.cwd !== cwd ||
-			now > pending.expiresAt ||
-			pending.expiresAt - now > pendingTtlMs
-		)
-			continue;
-		const containedPending = {
-			...pending,
-			details: {
-				...pending.details,
-				artifacts: [dirname(candidate)],
-			},
+		if (!persisted) continue;
+		if (persisted.sessionId !== sessionId || persisted.cwd !== cwd) continue;
+		if (!(await store.verifiedRunPath(runDir, { sessionId, cwd }))) continue;
+		const { artifacts: _artifacts, ...detailsWithoutArtifacts } =
+			persisted.details;
+		const pending: PendingValidatedCompaction = {
+			...persisted,
+			artifactDir: runDir,
+			details: retainArtifacts
+				? { ...persisted.details, artifacts: [runDir] }
+				: detailsWithoutArtifacts,
 		};
-		if (!newest || containedPending.expiresAt > newest.expiresAt)
-			newest = containedPending;
+		if (
+			isPendingExpired(pending, now) ||
+			pending.expiresAt - now > pendingTtlMs
+		) {
+			await disposePendingArtifact(pending, artifactRoot, retainArtifacts);
+			continue;
+		}
+		recoverable.push(pending);
 	}
+	recoverable.sort(
+		(left, right) =>
+			right.expiresAt - left.expiresAt ||
+			left.artifactDir.localeCompare(right.artifactDir),
+	);
+	const newest = recoverable[0] ?? null;
+	for (const superseded of recoverable.slice(1))
+		await disposePendingArtifact(superseded, artifactRoot, retainArtifacts);
 	return newest;
 }
 
@@ -619,9 +730,13 @@ async function handleSlipstreamCommandCore(
 	if (parsed.action === "artifacts")
 		return {
 			ok: true,
-			message: state.lastArtifactDir
-				? `Latest artifacts: ${state.lastArtifactDir}`
-				: "No Slipstream artifacts yet.",
+			message: config.retainArtifacts
+				? state.lastArtifactDir
+					? `Latest artifacts: ${state.lastArtifactDir}`
+					: "No Slipstream artifacts yet."
+				: state.pending?.artifactDir
+					? `Temporary pending artifacts: ${state.pending.artifactDir}`
+					: "Durable Slipstream artifact retention is disabled.",
 		};
 	if (parsed.flags.has("high-accuracy"))
 		return {
@@ -648,6 +763,7 @@ async function handleSlipstreamCommandCore(
 				cwd,
 				now,
 				config.pendingTtlMs,
+				config.retainArtifacts,
 			);
 			if (recovered) storePendingValidated(state, recovered);
 		}
@@ -656,33 +772,43 @@ async function handleSlipstreamCommandCore(
 			state.status === "ready_to_adopt" &&
 			(state.pending.sessionId !== sessionId || state.pending.cwd !== cwd)
 		) {
+			const mismatched = state.pending;
 			state.pending = null;
 			state.status = "idle";
+			await disposePendingArtifact(
+				mismatched,
+				await resolveArtifactRoot(mismatched.cwd, config.artifactRoot),
+				config.retainArtifacts,
+			);
 			const recovered = await recoverPendingArtifact(
 				artifactRoot,
 				sessionId,
 				cwd,
 				now,
 				config.pendingTtlMs,
+				config.retainArtifacts,
 			);
 			if (recovered) storePendingValidated(state, recovered);
 		}
 		if (
 			state.pending &&
 			state.status === "ready_to_adopt" &&
-			now > state.pending.expiresAt
-		)
-			return handleAdoptCommand(
-				state,
-				withRestoredStatusCallbacks(
-					state,
-					{ ...ctx, compact: ctx.compact.bind(ctx) },
-					config,
-				),
-				now,
-				sessionId,
-				cwd,
+			isPendingExpired(state.pending, now)
+		) {
+			const expired = state.pending;
+			state.pending = null;
+			state.status = "idle";
+			await disposePendingArtifact(
+				expired,
+				artifactRoot,
+				config.retainArtifacts,
 			);
+			return {
+				ok: false,
+				message:
+					"No unexpired validated Slipstream summary is pending for this session.",
+			};
+		}
 		const branchEntries = ctx.sessionManager?.getBranch() ?? [];
 		const continuation = buildContinuationFromBranch(
 			branchEntries,
@@ -729,13 +855,16 @@ async function handleSlipstreamCommandCore(
 					judgeThreshold: config.judgeThreshold,
 					repairAttempts: config.repairAttempts,
 					statsFullPaths: config.statsFullPaths,
+					retainArtifacts: config.retainArtifacts,
 					onProgress: progress,
 					signal: ctx.signal,
 				});
 			} finally {
 				progress.clear();
 			}
-			state.lastArtifactDir = result.artifactDir;
+			state.lastArtifactDir = config.retainArtifacts
+				? result.artifactDir
+				: null;
 			state.lastJudge = result.judge;
 			const rejectedAcceptance =
 				!result.accepted && result.firstKeptEntryId
@@ -743,6 +872,7 @@ async function handleSlipstreamCommandCore(
 							ctx,
 							result,
 							config.rejectedSummaryMode,
+							config.retainArtifacts,
 						)
 					: null;
 			if (
@@ -752,9 +882,21 @@ async function handleSlipstreamCommandCore(
 				const reason = result.judge.diagnosis || `score ${result.judge.score}`;
 				state.pending = null;
 				state.status = "rejected";
+				if (!config.retainArtifacts)
+					await removeArtifactRun(
+						artifactRoot,
+						result.artifactDir,
+						sessionId,
+						cwd,
+					);
+				await disposePendingArtifact(
+					stalePending,
+					artifactRoot,
+					config.retainArtifacts,
+				);
 				return {
 					ok: false,
-					message: `Pending Slipstream summary is stale and revalidation failed. Score ${result.judge.score}. ${reason}. Artifacts: ${result.artifactDir}`,
+					message: `Pending Slipstream summary is stale and revalidation failed. Score ${result.judge.score}. ${reason}.${config.retainArtifacts ? ` Artifacts: ${result.artifactDir}` : ""}`,
 				};
 			}
 			const refreshedPending = createPendingValidatedCompaction({
@@ -764,10 +906,34 @@ async function handleSlipstreamCommandCore(
 				rejectedAcceptance,
 				validatedThroughEntryId: continuation.triggerEntryId,
 				revalidatedFromEntryId: stalePending.validatedThroughEntryId,
+				retainArtifacts: config.retainArtifacts,
 				expiresAt: resolvedDeps.now() + config.pendingTtlMs,
 			});
-			await persistPendingArtifact(result.artifactDir, refreshedPending);
+			try {
+				await persistPendingArtifact(result.artifactDir, refreshedPending);
+			} catch (error) {
+				if (!config.retainArtifacts)
+					await removeArtifactRun(
+						artifactRoot,
+						result.artifactDir,
+						sessionId,
+						cwd,
+					);
+				throw error;
+			}
 			storePendingValidated(state, refreshedPending);
+			schedulePendingExpiryCleanup(
+				state,
+				refreshedPending,
+				artifactRoot,
+				config.retainArtifacts,
+				resolvedDeps.now,
+			);
+			await disposePendingArtifact(
+				stalePending,
+				artifactRoot,
+				config.retainArtifacts,
+			);
 		}
 		return handleAdoptCommand(
 			state,
@@ -786,6 +952,7 @@ async function handleSlipstreamCommandCore(
 		const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown";
 		const cwd = ctx.cwd ?? ".";
 		const contextUsage = ctx.getContextUsage?.();
+		const artifactRoot = await resolveArtifactRoot(cwd, config.artifactRoot);
 		const progress = makeProgressSink(ctx, state, config);
 		let result;
 		try {
@@ -793,19 +960,24 @@ async function handleSlipstreamCommandCore(
 				branchEntries,
 				sessionId,
 				cwd,
-				artifactRoot: await resolveArtifactRoot(cwd, config.artifactRoot),
+				artifactRoot,
 				tokensBefore: contextUsage?.tokens ?? null,
 				contextUsage,
+				retainArtifacts: config.retainArtifacts,
 				onProgress: progress,
 				signal: ctx.signal,
 			});
 		} finally {
 			progress.clear();
 		}
-		state.lastArtifactDir = result.artifactDir;
+		if (!config.retainArtifacts)
+			await removeArtifactRun(artifactRoot, result.artifactDir, sessionId, cwd);
+		state.lastArtifactDir = config.retainArtifacts ? result.artifactDir : null;
 		return {
 			ok: true,
-			message: `Dry run wrote artifacts: ${result.artifactDir}`,
+			message: config.retainArtifacts
+				? `Dry run wrote artifacts: ${result.artifactDir}`
+				: "Dry run completed; no artifacts were retained.",
 		};
 	}
 	const isOneShotCompact =
@@ -826,6 +998,7 @@ async function handleSlipstreamCommandCore(
 		const sessionId = ctx.sessionManager?.getSessionId?.() ?? "unknown";
 		const cwd = ctx.cwd ?? ".";
 		const contextUsage = ctx.getContextUsage?.();
+		const artifactRoot = await resolveArtifactRoot(cwd, config.artifactRoot);
 		const continuation = buildContinuationFromBranch(
 			branchEntries,
 			config.maxContinuationTurns,
@@ -842,11 +1015,12 @@ async function handleSlipstreamCommandCore(
 				branchEntries,
 				sessionId,
 				cwd,
-				artifactRoot: await resolveArtifactRoot(cwd, config.artifactRoot),
+				artifactRoot,
 				tokensBefore: contextUsage?.tokens ?? null,
 				contextUsage,
 				continuation,
 				statsFullPaths: config.statsFullPaths,
+				retainArtifacts: config.retainArtifacts,
 				completeSummary: resolvedDeps.createSummaryCompleter(
 					{ model: ctx.model, modelRegistry: ctx.modelRegistry },
 					config.summaryModel,
@@ -863,7 +1037,7 @@ async function handleSlipstreamCommandCore(
 		} finally {
 			progress.clear();
 		}
-		state.lastArtifactDir = result.artifactDir;
+		state.lastArtifactDir = config.retainArtifacts ? result.artifactDir : null;
 		state.lastJudge = result.judge;
 		const rejectedAcceptance =
 			!result.accepted && result.firstKeptEntryId
@@ -871,6 +1045,7 @@ async function handleSlipstreamCommandCore(
 						ctx,
 						result,
 						config.rejectedSummaryMode,
+						config.retainArtifacts,
 					)
 				: null;
 		if (
@@ -880,9 +1055,16 @@ async function handleSlipstreamCommandCore(
 			const reason = result.judge.diagnosis || `score ${result.judge.score}`;
 			state.pending = null;
 			state.status = "rejected";
+			if (!config.retainArtifacts)
+				await removeArtifactRun(
+					artifactRoot,
+					result.artifactDir,
+					sessionId,
+					cwd,
+				);
 			return {
 				ok: false,
-				message: `Slipstream could not prepare a compaction summary. Score ${result.judge.score}. ${reason}. Artifacts: ${result.artifactDir}`,
+				message: `Slipstream could not prepare a compaction summary. Score ${result.judge.score}. ${reason}.${config.retainArtifacts ? ` Artifacts: ${result.artifactDir}` : ""}`,
 			};
 		}
 		const pending = createPendingValidatedCompaction({
@@ -891,10 +1073,36 @@ async function handleSlipstreamCommandCore(
 			result,
 			rejectedAcceptance,
 			validatedThroughEntryId: continuation.triggerEntryId,
+			retainArtifacts: config.retainArtifacts,
 			expiresAt: resolvedDeps.now() + config.pendingTtlMs,
 		});
-		await persistPendingArtifact(result.artifactDir, pending);
+		const supersededPending = state.pending;
+		try {
+			await persistPendingArtifact(result.artifactDir, pending);
+		} catch (error) {
+			if (!config.retainArtifacts)
+				await removeArtifactRun(
+					artifactRoot,
+					result.artifactDir,
+					sessionId,
+					cwd,
+				);
+			throw error;
+		}
 		storePendingValidated(state, pending);
+		schedulePendingExpiryCleanup(
+			state,
+			pending,
+			artifactRoot,
+			config.retainArtifacts,
+			resolvedDeps.now,
+		);
+		if (supersededPending)
+			await disposePendingArtifact(
+				supersededPending,
+				artifactRoot,
+				config.retainArtifacts,
+			);
 		if (isOneShotCompact && ctx.compact)
 			return handleAdoptCommand(
 				state,

@@ -1,6 +1,6 @@
 {
   "name": "pi-slipstream-compact",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Slipstream-style validated compaction extension for Pi Coding Agent",
   "type": "module",
   "author": "OrestesK",

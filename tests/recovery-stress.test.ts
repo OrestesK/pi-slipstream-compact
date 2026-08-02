@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { ArtifactStore } from "../src/artifact-store.ts";
 import { handleSlipstreamCommand } from "../src/commands.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { createRuntimeState } from "../src/session-state.ts";
@@ -66,9 +67,13 @@ describe("pending recovery stress", () => {
 				},
 			);
 			await Promise.all(malformedWrites);
-			await writePendingText(
-				root,
-				"s-stress-valid-newest",
+			const validRun = await new ArtifactStore({ root }).createRun({
+				sessionId: "s-stress",
+				triggerEntryId: "a1",
+				cwd,
+			});
+			await writeFile(
+				join(validRun.dir, "pending.json"),
 				JSON.stringify(pending()),
 			);
 			await writePendingText(

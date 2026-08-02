@@ -46,6 +46,7 @@ describe("pipeline", () => {
 		const root = await makeRoot();
 		try {
 			const result = await runSlipstreamDryRun({
+				retainArtifacts: true,
 				branchEntries: [user("u1", "Goal: build package")],
 				sessionId: "s1",
 				cwd: "/repo",
@@ -60,11 +61,48 @@ describe("pipeline", () => {
 		}
 	});
 
+	it("omits temporary artifact paths from a non-retained prompt", async () => {
+		const root = await makeRoot();
+		try {
+			const result = await runSlipstreamDryRun({
+				retainArtifacts: false,
+				branchEntries: [user("u1", "Goal: build package")],
+				sessionId: "s-no-retained-prompt-paths",
+				cwd: "/repo",
+				artifactRoot: root,
+				executeGit: async (args) => {
+					if (args.includes("status"))
+						return { stdout: " M src/b.ts\n", stderr: "" };
+					if (args.includes("--stat"))
+						return { stdout: " src/b.ts | 1 +\n", stderr: "" };
+					return {
+						stdout: "diff --git a/src/b.ts b/src/b.ts\n+change\n",
+						stderr: "",
+					};
+				},
+			});
+
+			assert.equal(result.candidatePrompt.includes(root), false);
+			assert.equal(
+				result.candidatePrompt.includes("state-evidence.json"),
+				false,
+			);
+			assert.match(
+				result.candidatePrompt,
+				/Full git diff artifact paths:\n- None/,
+			);
+			assert.match(result.candidatePrompt, /Full git diff preserved: false/);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("yields after snapshot progress before reading branch content", async () => {
 		const root = await makeRoot();
 		let yielded = false;
 		try {
 			const result = await runSlipstreamDryRun({
+				retainArtifacts: true,
 				branchEntries: [
 					{
 						type: "message",
@@ -109,6 +147,7 @@ describe("pipeline", () => {
 		let judgeCalls = 0;
 		try {
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Goal: validate prompt yields"),
 					assistant("a1", "Ready"),
@@ -190,6 +229,7 @@ describe("pipeline", () => {
 		try {
 			const fullDiff = `diff --git a/src/b.ts b/src/b.ts\n+FULL_DIFF_ARTIFACT_SENTINEL\n`;
 			const result = await runSlipstreamDryRun({
+				retainArtifacts: true,
 				branchEntries: [user("u1", "Goal: build package")],
 				sessionId: "s-git-artifact",
 				cwd: "/repo",
@@ -252,6 +292,7 @@ describe("pipeline", () => {
 			let summaryPrompt = "";
 			let judgePrompt = "";
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: entries,
 				sessionId: "s-latest",
 				cwd: "/repo",
@@ -327,6 +368,7 @@ describe("pipeline", () => {
 		const root = await makeRoot();
 		try {
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "old"),
 					assistant("a1", "old answer"),
@@ -372,6 +414,7 @@ describe("pipeline", () => {
 		const root = await makeRoot();
 		try {
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "old work 1"),
 					assistant("a1", "old answer 1"),
@@ -414,6 +457,7 @@ describe("pipeline", () => {
 		try {
 			process.env.PI_SLIPSTREAM_STATS_ROOT = "/dev/null";
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Use Slipstream and keep telemetry optional."),
 					assistant("a1", "implementation done"),
@@ -452,6 +496,7 @@ describe("pipeline", () => {
 			let summaryCalls = 0;
 			let judgeCalls = 0;
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Use Slipstream and keep CONFIG_PATH_SENTINEL."),
 					assistant("a1", "implementation done"),
@@ -498,6 +543,7 @@ describe("pipeline", () => {
 			let judgeCalls = 0;
 			const progress: string[] = [];
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Use Slipstream and keep EMPTY_TWICE_SENTINEL."),
 					assistant("a1", "implementation done"),
@@ -541,6 +587,7 @@ describe("pipeline", () => {
 			const judgePromptLengths: number[] = [];
 			const progress: string[] = [];
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Use Slipstream and keep PARSE_ERROR_SENTINEL."),
 					assistant("a1", "implementation done"),
@@ -630,6 +677,7 @@ describe("pipeline", () => {
 		try {
 			let judgeCalls = 0;
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "start"),
 					assistant(
@@ -694,6 +742,7 @@ describe("pipeline", () => {
 		try {
 			let judgeCalls = 0;
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Continue the benchmark analysis."),
 					assistant("a1", "Current answer: compare quality repair outcomes."),
@@ -747,6 +796,7 @@ describe("pipeline", () => {
 			let summaryCalls = 0;
 			let judgeCalls = 0;
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Continue the benchmark analysis."),
 					assistant("a1", "Current answer: preserve repair recovery details."),
@@ -807,6 +857,7 @@ describe("pipeline", () => {
 		try {
 			let judgeCalls = 0;
 			const result = await runValidatedSlipstream({
+				retainArtifacts: true,
 				branchEntries: [
 					user("u1", "Use Slipstream. Next step implementation."),
 				],

@@ -43,6 +43,7 @@ describe("Slipstream widget", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "validated",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",

@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { ArtifactStore } from "../src/artifact-store.ts";
 import {
 	finalizeAutoJob,
 	isAutoTriggerBoundary,
@@ -32,6 +33,7 @@ import type { AgentMessage, AutoJob, SessionEntry } from "../src/types.ts";
 function config() {
 	return {
 		...DEFAULT_CONFIG,
+		retainArtifacts: true,
 		autoTrigger: true,
 		triggerContextPercent: 0.55,
 		softContextPercent: 0.55,
@@ -201,7 +203,7 @@ describe("auto Slipstream lifecycle", () => {
 				match: {
 					sessionId: "s1",
 					cwd: "/repo",
-					now: 10_001,
+					now: 10_000,
 					validatedThroughEntryId: "a1",
 				},
 			},
@@ -231,6 +233,7 @@ describe("auto Slipstream lifecycle", () => {
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
+				artifactDir: "/tmp/slipstream-pending",
 				summary: "## Goal\nStale",
 				firstKeptEntryId: "k1",
 				validatedThroughEntryId: "a1",
@@ -261,6 +264,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nStill valid",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -307,6 +311,7 @@ describe("auto Slipstream lifecycle", () => {
 
 		const autoJobState = createRuntimeState();
 		autoJobState.autoJob = {
+			artifactRoot: "/tmp",
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
@@ -375,6 +380,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -411,6 +417,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -447,6 +454,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nStale",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -480,6 +488,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -843,6 +852,7 @@ describe("auto Slipstream lifecycle", () => {
 			const state = createRuntimeState();
 			let resolveSummary!: (summary: string) => void;
 			state.autoJob = {
+				artifactRoot: "/tmp",
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
@@ -1029,6 +1039,71 @@ describe("auto Slipstream lifecycle", () => {
 			assert.equal(state.pending?.tokensBefore, null);
 			assert.equal(state.pending?.firstKeptEntryId, job.firstKeptEntryId);
 			assert.equal(state.status, "ready_to_adopt");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("omits temporary paths and removes a rejected non-retained auto run", async () => {
+		const parent = join(process.cwd(), ".scratch", "test-tmp");
+		await mkdir(parent, { recursive: true });
+		const root = await mkdtemp(join(parent, "slipstream-auto-non-retained-"));
+		try {
+			const state = createRuntimeState();
+			const defaultConfig = {
+				...config(),
+				retainArtifacts: false,
+				rejectedSummaryMode: "reject" as const,
+			};
+			let summaryPrompt = "";
+			const job = await startAutoJob({
+				state,
+				config: defaultConfig,
+				branchEntries: [
+					msg("u1", { role: "user", content: "Use Slipstream" }),
+					msg("a1", { role: "assistant", content: "older" }),
+					msg("u2", { role: "user", content: "more" }),
+					msg("a2", { role: "assistant", content: "more" }),
+					msg("u3", { role: "user", content: "more" }),
+					msg("a3", { role: "assistant", content: "more" }),
+					msg("u4", { role: "user", content: "more" }),
+					msg("a4", { role: "assistant", content: "more" }),
+					msg("u5", { role: "user", content: "new work" }),
+					msg("a5", { role: "assistant", content: "recent kept" }),
+				],
+				sessionId: "s-auto-non-retained",
+				cwd: "/repo",
+				artifactRoot: root,
+				completeSummary: async (prompt) => {
+					summaryPrompt = prompt;
+					return "## Goal\nRejected summary";
+				},
+			});
+			assert.ok(job);
+			job.continuation.appendTurn({
+				turnIndex: 1,
+				message: { role: "assistant", content: "future turn" },
+				toolResults: [],
+			});
+
+			const accepted = await finalizeAutoJob({
+				state,
+				config: defaultConfig,
+				completeSummary: async () => "## Goal\nRepair",
+				completeJudge: async () => ({
+					score: 4,
+					decision: "reject",
+					missing: ["important context"],
+					contradictions: [],
+					diagnosis: "incomplete",
+				}),
+				now: () => Date.now(),
+			});
+
+			assert.equal(accepted, false);
+			assert.equal(summaryPrompt.includes(root), false);
+			assert.equal(summaryPrompt.includes(job.artifactDir), false);
+			await assert.rejects(() => access(job.artifactDir));
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -1902,9 +1977,13 @@ describe("auto Slipstream lifecycle", () => {
 			join(process.cwd(), ".scratch", "test-tmp", "startup-recovery-yield-"),
 		);
 		try {
-			const artifactDir = join(root, "s-start-ready");
+			const run = await new ArtifactStore({ root }).createRun({
+				sessionId: "s-start",
+				triggerEntryId: "a1",
+				cwd: process.cwd(),
+			});
+			const artifactDir = run.dir;
 			const expiresAt = Date.now() + 10_000;
-			await mkdir(artifactDir, { recursive: true });
 			await writeFile(
 				join(artifactDir, "pending.json"),
 				`${JSON.stringify(
@@ -2081,6 +2160,7 @@ describe("auto Slipstream lifecycle", () => {
 					message: "Starting auto candidate summary",
 				});
 				const job: AutoJob = {
+					artifactRoot: input.artifactRoot,
 					sessionId: input.sessionId,
 					cwd: input.cwd,
 					projectId: input.cwd,
@@ -2214,6 +2294,7 @@ describe("auto Slipstream lifecycle", () => {
 					message: "Starting auto candidate summary",
 				});
 				const job: AutoJob = {
+					artifactRoot: input.artifactRoot,
 					sessionId: input.sessionId,
 					cwd: input.cwd,
 					projectId: input.cwd,
@@ -2320,6 +2401,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "validated",
 			firstKeptEntryId: "k1",
 			validatedThroughEntryId: "a1",
@@ -2417,8 +2499,12 @@ describe("auto Slipstream lifecycle", () => {
 			const state = createRuntimeState();
 			const sessionId = "s-startup-pending";
 			const cwd = process.cwd();
-			const runDir = join(root, `${sessionId}-run`);
-			await mkdir(runDir, { recursive: true });
+			const run = await new ArtifactStore({ root }).createRun({
+				sessionId,
+				triggerEntryId: "a1",
+				cwd,
+			});
+			const runDir = run.dir;
 			await writeFile(
 				join(runDir, "pending.json"),
 				`${JSON.stringify({
@@ -2500,6 +2586,10 @@ describe("auto Slipstream lifecycle", () => {
 			const runDir = join(root, `${sessionId}-run`);
 			await mkdir(runDir, { recursive: true });
 			await writeFile(
+				join(runDir, "run.json"),
+				`${JSON.stringify({ id: "run", sessionId, triggerEntryId: "a0", cwd })}\n`,
+			);
+			await writeFile(
 				join(runDir, "pending.json"),
 				`${JSON.stringify({
 					sessionId,
@@ -2537,7 +2627,11 @@ describe("auto Slipstream lifecycle", () => {
 					if (event === "session_start") handlers.session_start = handler;
 				},
 			} as unknown as Parameters<typeof registerLifecycle>[0];
-			registerLifecycle(pi, { ...config(), artifactRoot: root }, state);
+			registerLifecycle(
+				pi,
+				{ ...config(), artifactRoot: root, retainArtifacts: false },
+				state,
+			);
 
 			await handlers.session_start?.(
 				{ reason: "startup" },
@@ -2562,6 +2656,7 @@ describe("auto Slipstream lifecycle", () => {
 
 			assert.equal(state.pending, null);
 			assert.equal(widgetUpdates.at(-1), undefined);
+			await access(join(runDir, "pending.json"));
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -2779,6 +2874,7 @@ describe("auto Slipstream lifecycle", () => {
 					message: "Starting auto candidate summary",
 				});
 				const job: AutoJob = {
+					artifactRoot: input.artifactRoot,
 					sessionId: input.sessionId,
 					cwd: input.cwd,
 					projectId: input.cwd,
@@ -3054,6 +3150,7 @@ describe("auto Slipstream lifecycle", () => {
 				startAutoJob: async (input) => {
 					const summaryPromise = Promise.resolve("## Goal\nIdle auto summary");
 					const job: AutoJob = {
+						artifactRoot: input.artifactRoot,
 						sessionId: input.sessionId,
 						cwd: input.cwd,
 						projectId: input.cwd,
@@ -3113,6 +3210,7 @@ describe("auto Slipstream lifecycle", () => {
 						sessionId: "s1",
 						cwd: "/repo",
 						projectId: "/repo",
+						artifactDir: "/tmp/slipstream-pending",
 						summary: "## Goal\nIdle auto accepted",
 						firstKeptEntryId: "u1",
 						validatedThroughEntryId: "a1",
@@ -3188,6 +3286,7 @@ describe("auto Slipstream lifecycle", () => {
 				startAutoJob: async (input) => {
 					const summaryPromise = Promise.resolve("## Goal\nIdle auto summary");
 					const job: AutoJob = {
+						artifactRoot: input.artifactRoot,
 						sessionId: input.sessionId,
 						cwd: input.cwd,
 						projectId: input.cwd,
@@ -3246,6 +3345,7 @@ describe("auto Slipstream lifecycle", () => {
 						sessionId: "s1",
 						cwd: "/repo",
 						projectId: "/repo",
+						artifactDir: "/tmp/slipstream-pending",
 						summary: "## Goal\nIdle auto accepted",
 						firstKeptEntryId: "u1",
 						validatedThroughEntryId: "a1",
@@ -3330,6 +3430,7 @@ describe("auto Slipstream lifecycle", () => {
 				startAutoJob: async (input) => {
 					const summaryPromise = Promise.resolve("## Goal\nIdle auto summary");
 					const job: AutoJob = {
+						artifactRoot: input.artifactRoot,
 						sessionId: input.sessionId,
 						cwd: input.cwd,
 						projectId: input.cwd,
@@ -3388,6 +3489,7 @@ describe("auto Slipstream lifecycle", () => {
 						sessionId: "s1",
 						cwd: "/repo",
 						projectId: "/repo",
+						artifactDir: "/tmp/slipstream-pending",
 						summary: "## Goal\nIdle auto accepted",
 						firstKeptEntryId: "u1",
 						validatedThroughEntryId: "a1",
@@ -3484,6 +3586,7 @@ describe("auto Slipstream lifecycle", () => {
 				{
 					startAutoJob: async (input) => {
 						const job: AutoJob = {
+							artifactRoot: input.artifactRoot,
 							sessionId: input.sessionId,
 							cwd: input.cwd,
 							projectId: input.cwd,
@@ -3639,6 +3742,7 @@ describe("auto Slipstream lifecycle", () => {
 					startAutoJob: async (input) => {
 						startCalls += 1;
 						const job: AutoJob = {
+							artifactRoot: input.artifactRoot,
 							sessionId: input.sessionId,
 							cwd: input.cwd,
 							projectId: input.cwd,
@@ -3698,6 +3802,7 @@ describe("auto Slipstream lifecycle", () => {
 							sessionId: "s1",
 							cwd,
 							projectId: cwd,
+							artifactDir: "/tmp/slipstream-pending",
 							summary: "## Goal\nNeeds idle revalidation",
 							firstKeptEntryId: "u1",
 							validatedThroughEntryId: "a1",
@@ -3785,6 +3890,7 @@ describe("auto Slipstream lifecycle", () => {
 	it("auto finalization shows progress and restores pending status", async () => {
 		const state = createRuntimeState();
 		state.autoJob = {
+			artifactRoot: "/tmp",
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
@@ -3853,6 +3959,7 @@ describe("auto Slipstream lifecycle", () => {
 					sessionId: "s1",
 					cwd: "/repo",
 					projectId: "/repo",
+					artifactDir: "/tmp/slipstream-pending",
 					summary: "## Goal\nAuto",
 					firstKeptEntryId: "a1",
 					validatedThroughEntryId: "a2",
@@ -3909,6 +4016,7 @@ describe("auto Slipstream lifecycle", () => {
 		try {
 			const state = createRuntimeState();
 			state.autoJob = {
+				artifactRoot: "/tmp",
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
@@ -4013,6 +4121,7 @@ describe("auto Slipstream lifecycle", () => {
 		try {
 			const state = createRuntimeState();
 			state.autoJob = {
+				artifactRoot: "/tmp",
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
@@ -4098,6 +4207,7 @@ describe("auto Slipstream lifecycle", () => {
 		try {
 			const state = createRuntimeState();
 			state.autoJob = {
+				artifactRoot: "/tmp",
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
@@ -4178,6 +4288,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nStale summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -4254,6 +4365,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4395,6 +4507,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4498,6 +4611,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4617,7 +4731,7 @@ describe("auto Slipstream lifecycle", () => {
 			"queued revalidation completion",
 		);
 		assert.equal(state.pending?.firstKeptEntryId, "boundary-a3");
-		assert.equal(compactCalls, 1);
+		await waitUntil(() => compactCalls === 1, "queued revalidation adoption");
 	});
 
 	it("stale pending revalidation recomputes the retained-tail boundary", async () => {
@@ -4626,6 +4740,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4733,6 +4848,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4829,6 +4945,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -4928,6 +5045,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "old-boundary",
 			validatedThroughEntryId: "a1",
@@ -5003,6 +5121,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5059,6 +5178,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5231,6 +5351,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5292,6 +5413,7 @@ describe("auto Slipstream lifecycle", () => {
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
+				artifactDir: "/tmp/slipstream-pending",
 				summary: "## Goal\nReady",
 				firstKeptEntryId: "a1",
 				validatedThroughEntryId: "a1",
@@ -5361,6 +5483,7 @@ describe("auto Slipstream lifecycle", () => {
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
+				artifactDir: "/tmp/slipstream-pending",
 				summary: "## Goal\nReady",
 				firstKeptEntryId: "a1",
 				validatedThroughEntryId: "a1",
@@ -5429,6 +5552,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5488,6 +5612,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5553,6 +5678,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5620,6 +5746,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5691,6 +5818,7 @@ describe("auto Slipstream lifecycle", () => {
 				sessionId: "s1",
 				cwd: "/repo",
 				projectId: "/repo",
+				artifactDir: "/tmp/slipstream-pending",
 				summary: "## Goal\nReady",
 				firstKeptEntryId: "a1",
 				validatedThroughEntryId: "a1",
@@ -5765,6 +5893,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5824,6 +5953,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5892,6 +6022,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -5958,6 +6089,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6020,6 +6152,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6102,6 +6235,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6156,6 +6290,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6410,6 +6545,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s-adopt",
 			cwd: "/repo",
 			projectId: "p1",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "validated adopt summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6706,16 +6842,24 @@ describe("auto Slipstream lifecycle", () => {
 		assert.equal(defaultCalls, 1);
 	});
 
-	it("session_before_compact consumes a matching pending summary", async () => {
+	it("session_before_compact consumes a matching pending summary", async (t) => {
 		const parent = join(process.cwd(), ".scratch", "test-tmp");
 		await mkdir(parent, { recursive: true });
-		const artifactDir = await mkdtemp(join(parent, "slipstream-consume-"));
+		const artifactRoot = await mkdtemp(join(parent, "slipstream-consume-"));
+		t.after(() => rm(artifactRoot, { recursive: true, force: true }));
+		const run = await new ArtifactStore({ root: artifactRoot }).createRun({
+			sessionId: "s1",
+			triggerEntryId: "a1",
+			cwd: process.cwd(),
+		});
+		const artifactDir = run.dir;
 		await writeFile(join(artifactDir, "pending.json"), "{}", "utf8");
 		const state = createRuntimeState();
 		storePendingValidated(state, {
 			sessionId: "s1",
-			cwd: "/repo",
+			cwd: process.cwd(),
 			projectId: process.cwd(),
+			artifactDir,
 			summary: "## Goal\nReady summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6746,7 +6890,7 @@ describe("auto Slipstream lifecycle", () => {
 				}
 			},
 		} as unknown as Parameters<typeof registerLifecycle>[0];
-		registerLifecycle(pi, config(), state, {
+		registerLifecycle(pi, { ...config(), artifactRoot }, state, {
 			buildDefaultSlipstreamCompaction: async () => {
 				throw new Error("matching pending should be consumed, not regenerated");
 			},
@@ -6760,7 +6904,7 @@ describe("auto Slipstream lifecycle", () => {
 				branchEntries: branch,
 			},
 			{
-				cwd: "/repo",
+				cwd: process.cwd(),
 				ui: {
 					setStatus: (_key: string, text: string | undefined) => {
 						statusUpdates.push(text);
@@ -6801,7 +6945,7 @@ describe("auto Slipstream lifecycle", () => {
 				compactionEntry: { summary: "## Goal\nReady summary" },
 			},
 			{
-				cwd: "/repo",
+				cwd: process.cwd(),
 				ui: {
 					setStatus: (_key: string, text: string | undefined) => {
 						statusUpdates.push(text);
@@ -6829,6 +6973,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nStale pending",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6883,18 +7028,26 @@ describe("auto Slipstream lifecycle", () => {
 		assert.equal(widgetUpdates.at(-1), undefined);
 	});
 
-	it("session_compact invalidates ready pending state but remains a no-op when disabled", async () => {
+	it("session_compact invalidates ready pending state but remains a no-op when disabled", async (t) => {
 		const parent = join(process.cwd(), ".scratch", "test-tmp");
 		await mkdir(parent, { recursive: true });
-		const artifactDir = await mkdtemp(
+		const artifactRoot = await mkdtemp(
 			join(parent, "slipstream-session-compact-"),
 		);
+		t.after(() => rm(artifactRoot, { recursive: true, force: true }));
+		const run = await new ArtifactStore({ root: artifactRoot }).createRun({
+			sessionId: "s1",
+			triggerEntryId: "a1",
+			cwd: process.cwd(),
+		});
+		const artifactDir = run.dir;
 		await writeFile(join(artifactDir, "pending.json"), "{}", "utf8");
 		const state = createRuntimeState();
 		storePendingValidated(state, {
 			sessionId: "s1",
-			cwd: "/repo",
+			cwd: process.cwd(),
 			projectId: process.cwd(),
+			artifactDir,
 			summary: "## Goal\nReady summary",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -6917,12 +7070,12 @@ describe("auto Slipstream lifecycle", () => {
 				if (event === "session_compact") handlers.session_compact = handler;
 			},
 		} as unknown as Parameters<typeof registerLifecycle>[0];
-		registerLifecycle(pi, config(), state);
+		registerLifecycle(pi, { ...config(), artifactRoot }, state);
 
 		await handlers.session_compact?.(
 			{ type: "session_compact", fromExtension: false, compactionEntry: {} },
 			{
-				cwd: "/repo",
+				cwd: process.cwd(),
 				ui: {
 					setStatus: (_key: string, text: string | undefined) => {
 						statusUpdates.push(text);
@@ -7040,6 +7193,7 @@ describe("auto Slipstream lifecycle", () => {
 		const state = createRuntimeState();
 		let appended = false;
 		state.autoJob = {
+			artifactRoot: "/tmp",
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
@@ -7121,6 +7275,7 @@ describe("auto Slipstream lifecycle", () => {
 					sessionId: "s1",
 					cwd: "/repo",
 					projectId: "/repo",
+					artifactDir: "/tmp/slipstream-pending",
 					summary: "## Goal\nAuto summary",
 					firstKeptEntryId: "a5",
 					validatedThroughEntryId: input.validatedThroughEntryId ?? null,
@@ -7183,6 +7338,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nFuture branch pending",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "future-head",
@@ -7247,6 +7403,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nCurrent pending",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "rewound-head",
@@ -7342,6 +7499,7 @@ describe("auto Slipstream lifecycle", () => {
 			firstKeptEntryId: "future-head",
 			tokensBefore: 100,
 			artifactDir: "/tmp/slipstream-test",
+			artifactRoot: "/tmp",
 			summaryArtifactRefs: [],
 			continuation: {
 				appendTurn: () => {
@@ -7436,6 +7594,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nOld pending",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",
@@ -7759,6 +7918,7 @@ describe("auto Slipstream lifecycle", () => {
 		registerLifecycle(pi, config(), state, {
 			startAutoJob: async (input) => {
 				const job: AutoJob = {
+					artifactRoot: input.artifactRoot,
 					sessionId: input.sessionId,
 					cwd: input.cwd,
 					projectId: input.cwd,
@@ -7879,6 +8039,7 @@ describe("auto Slipstream lifecycle", () => {
 			sessionId: "s1",
 			cwd: "/repo",
 			projectId: "/repo",
+			artifactDir: "/tmp/slipstream-pending",
 			summary: "## Goal\nReady pending",
 			firstKeptEntryId: "a1",
 			validatedThroughEntryId: "a1",

@@ -21,6 +21,7 @@ export type SlipstreamConfig = {
 	rejectedSummaryMode: RejectedSummaryMode;
 	pendingTtlMs: number;
 	artifactRoot: string;
+	retainArtifacts: boolean;
 	statsFullPaths: boolean;
 	summaryModel?: string;
 	judgeModel?: string;
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG: SlipstreamConfig = Object.freeze({
 	rejectedSummaryMode: "ask",
 	pendingTtlMs: 5 * 60 * 1000,
 	artifactRoot: ".scratch/compactions",
+	retainArtifacts: false,
 	statsFullPaths: false,
 });
 
@@ -276,6 +278,11 @@ export function normalizeConfig(raw: unknown = {}): SlipstreamConfig {
 		artifactRoot:
 			optionalString(raw, "artifactRoot", DEFAULT_CONFIG.artifactRoot) ??
 			DEFAULT_CONFIG.artifactRoot,
+		retainArtifacts: optionalBoolean(
+			raw,
+			"retainArtifacts",
+			DEFAULT_CONFIG.retainArtifacts,
+		),
 		statsFullPaths: optionalBoolean(
 			raw,
 			"statsFullPaths",

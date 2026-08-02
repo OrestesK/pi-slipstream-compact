@@ -113,8 +113,17 @@ export function storePendingValidated(
 			? (judge as RuntimeState["lastJudge"])
 			: state.lastJudge;
 	const artifacts = pending.details.artifacts;
-	if (Array.isArray(artifacts) && typeof artifacts[0] === "string")
-		state.lastArtifactDir = artifacts[0];
+	state.lastArtifactDir =
+		Array.isArray(artifacts) && typeof artifacts[0] === "string"
+			? artifacts[0]
+			: null;
+}
+
+export function isPendingExpired(
+	pending: Pick<PendingValidatedCompaction, "expiresAt">,
+	now: number,
+): boolean {
+	return now >= pending.expiresAt;
 }
 
 export function consumePendingForCompaction(
@@ -130,7 +139,7 @@ export function consumePendingForCompaction(
 	| undefined {
 	const pending = state.pending;
 	if (!pending) return undefined;
-	if (match.now > pending.expiresAt) {
+	if (isPendingExpired(pending, match.now)) {
 		state.pending = null;
 		state.status = "idle";
 		return undefined;
@@ -185,7 +194,7 @@ export function activeSlipstreamCompactionRequest(
 ): NonNullable<RuntimeState["slipstreamCompactionRequest"]> | null {
 	const request = state.slipstreamCompactionRequest;
 	if (!request) return null;
-	if (now > request.expiresAt) {
+	if (now >= request.expiresAt) {
 		state.slipstreamCompactionRequest = null;
 		return null;
 	}
@@ -207,7 +216,7 @@ export function adoptPending(
 ): "slipstream" | "busy" | null {
 	const pending = state.pending;
 	if (!pending || state.status !== "ready_to_adopt") return null;
-	if (match.now > pending.expiresAt) {
+	if (isPendingExpired(pending, match.now)) {
 		state.pending = null;
 		state.status = "idle";
 		return null;
