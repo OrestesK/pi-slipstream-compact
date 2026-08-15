@@ -8,11 +8,13 @@ The benchmark asks one practical question: after a long coding session is compac
 
 Slipstream scored substantially higher than native Pi `/compact` on continuation-readiness benchmarks.
 
-| Evaluation                             | Slipstream | Native `/compact` | Benchmark Codex prompt |
-| -------------------------------------- | ---------: | ----------------: | ---------------------: |
-| Fresh-agent continuation validation    |    9.36/10 |           5.36/10 |                3.00/10 |
-| Blinded continuation-review benchmark  |    9.00/10 |           5.36/10 |                4.24/10 |
-| Focused rerun of weakest full-run case |    9.00/10 |           3.67/10 |                0.00/10 |
+| Evaluation                             | Slipstream | Native `/compact` |
+| -------------------------------------- | ---------: | ----------------: |
+| Fresh-agent continuation validation    |    9.36/10 |           5.36/10 |
+| Blinded continuation-review benchmark  |    9.00/10 |           5.36/10 |
+| Focused rerun of weakest full-run case |    9.00/10 |           3.67/10 |
+
+These tables retain the Slipstream and native Pi results from that historical evaluation; no benchmark was rerun for this editorial change.
 
 The strongest signal is the fresh-agent continuation validation: a no-tool fresh agent received only the compacted handoff, produced a continuation response, and that response was judged against source evidence. Slipstream had a `1.0` continuation success rate and `none:11` recorded failure modes on the clean overlap set.
 
@@ -27,13 +29,12 @@ Raw sessions, prompts, judge outputs, copied session snapshots, and benchmark ar
 
 These results are not SWE-bench task scores. SWE-bench-derived trajectories were used as some source material for compaction/continuation evaluation, not as an external issue-resolution benchmark.
 
-## Methods compared
+## Reported methods
 
-| Method                 | Meaning                                           |
-| ---------------------- | ------------------------------------------------- |
-| Slipstream             | `pi-slipstream-compact` reviewed compaction path. |
-| Native `/compact`      | Pi's native compaction behavior.                  |
-| Benchmark Codex prompt | A benchmark-only Codex-style prompt baseline.     |
+| Method            | Meaning                                           |
+| ----------------- | ------------------------------------------------- |
+| Slipstream        | `pi-slipstream-compact` reviewed compaction path. |
+| Native `/compact` | Pi's native compaction behavior.                  |
 
 Method names were hidden from LLM judges by randomized candidate labels.
 
@@ -62,19 +63,17 @@ A no-tool fresh agent received a compacted handoff and produced a continuation r
 
 ### Fresh-agent continuation validation
 
-| Method                 | Overall avg | Success rate | Stale-state score | Failure modes                     |
-| ---------------------- | ----------: | -----------: | ----------------: | --------------------------------- |
-| Slipstream             |     9.36/10 |         1.00 |          10.00/10 | `none:11`                         |
-| Native `/compact`      |     5.36/10 |         0.45 |           5.18/10 | stale/latest-state issues         |
-| Benchmark Codex prompt |     3.00/10 |         0.18 |           3.45/10 | latest-state/next-action failures |
+| Method            | Overall avg | Success rate | Stale-state score | Failure modes             |
+| ----------------- | ----------: | -----------: | ----------------: | ------------------------- |
+| Slipstream        |     9.36/10 |         1.00 |          10.00/10 | `none:11`                 |
+| Native `/compact` |     5.36/10 |         0.45 |           5.18/10 | stale/latest-state issues |
 
 ### Blinded continuation-review benchmark
 
-| Method                 | Overall avg |  Wins |
-| ---------------------- | ----------: | ----: |
-| Slipstream             |     9.00/10 | 64/66 |
-| Native `/compact`      |     5.36/10 |  1/66 |
-| Benchmark Codex prompt |     4.24/10 |  0/66 |
+| Method            | Overall avg |  Wins |
+| ----------------- | ----------: | ----: |
+| Slipstream        |     9.00/10 | 64/66 |
+| Native `/compact` |     5.36/10 |  1/66 |
 
 The remaining judge decision was a tie.
 
@@ -82,11 +81,10 @@ The remaining judge decision was a tie.
 
 A focused rerun was performed for the only full-run case with weak Slipstream judgments after tightening source preparation.
 
-| Method                 | Overall avg | Wins |
-| ---------------------- | ----------: | ---: |
-| Slipstream             |     9.00/10 |  3/3 |
-| Native `/compact`      |     3.67/10 |  0/3 |
-| Benchmark Codex prompt |     0.00/10 |  0/3 |
+| Method            | Overall avg | Wins |
+| ----------------- | ----------: | ---: |
+| Slipstream        |     9.00/10 |  3/3 |
+| Native `/compact` |     3.67/10 |  0/3 |
 
 ## Interpretation
 
